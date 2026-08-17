@@ -3,11 +3,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from io import StringIO
+from io import StringIO, BytesIO
 from datetime import datetime, timezone
 import hashlib
 import hmac
 import base64
+import zipfile as pyzipfile
 from urllib.parse import urlencode
 
 st.set_page_config(
@@ -132,6 +133,7 @@ def fetch_feed(url):
 # REALO + STATBEL
 # ----------------------------
 STATBEL_REAL_ESTATE_XLSX = "https://statbel.fgov.be/sites/default/files/files/opendata/immo/vastgoed_2010_9999.xlsx"
+STATBEL_REAL_ESTATE_ZIP = "https://statbel.fgov.be/sites/default/files/files/opendata/immo/vastgoed_2010_9999.zip"
 
 def get_realo_config():
     """Read credentials only from Streamlit Secrets."""
@@ -217,7 +219,71 @@ def flatten_realo_listing(item):
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def load_statbel_real_estate():
-    return pd.read_excel(STATBEL_REAL_ESTATE_XLSX, engine="openpyxl")
+    """
+    Robust Statbel loader.
+    1) Try XLSX with browser-like headers and validate the ZIP magic bytes ("PK").
+    2) If Statbel returns HTML or an invalid XLSX, fall back to the official ZIP/TXT dataset.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/151.0 Safari/537.36",
+        "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+                  "application/zip,text/plain,*/*",
+        "Accept-Language": "fr-BE,fr;q=0.9,en;q=0.8",
+        "Referer": "https://statbel.fgov.be/",
+    }
+
+    # --- Attempt 1: XLSX ---
+    r = requests.get(STATBEL_REAL_ESTATE_XLSX, headers=headers, timeout=40, allow_redirects=True)
+    if r.ok and len(r.content) > 4 and r.content[:2] == b"PK":
+        try:
+            return pd.read_excel(BytesIO(r.content), engine="openpyxl")
+        except Exception:
+            pass
+
+    # --- Attempt 2: ZIP/TXT official fallback ---
+    rz = requests.get(STATBEL_REAL_ESTATE_ZIP, headers=headers, timeout=40, allow_redirects=True)
+    if not rz.ok:
+        raise RuntimeError(
+            f"Statbel inaccessible (XLSX HTTP {r.status_code}, ZIP HTTP {rz.status_code})."
+        )
+    if len(rz.content) < 4 or rz.content[:2] != b"PK":
+        ctype = rz.headers.get("content-type", "inconnu")
+        preview = rz.text[:120].replace("\\n", " ") if "text" in ctype or "html" in ctype else ""
+        raise RuntimeError(
+            f"Statbel n'a pas renvoyé un vrai fichier ZIP (type={ctype}). {preview}"
+        )
+
+    with pyzipfile.ZipFile(BytesIO(rz.content)) as zf:
+        names = [n for n in zf.namelist() if not n.endswith("/")]
+        candidates = [
+            n for n in names
+            if n.lower().endswith((".txt", ".csv", ".tsv"))
+        ]
+        if not candidates:
+            raise RuntimeError("Le ZIP Statbel ne contient aucun fichier TXT/CSV reconnu.")
+
+        # Prefer the largest likely data file.
+        candidates.sort(key=lambda n: zf.getinfo(n).file_size, reverse=True)
+        raw = zf.read(candidates[0])
+
+    # Statbel TXT exports are commonly UTF-8/Windows-1252 and tab/semicolon delimited.
+    last_error = None
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+        for sep in ("\\t", ";", ",", "|"):
+            try:
+                df = pd.read_csv(
+                    BytesIO(raw),
+                    encoding=enc,
+                    sep=sep,
+                    low_memory=False
+                )
+                if df.shape[1] >= 4 and len(df) > 0:
+                    return df
+            except Exception as e:
+                last_error = e
+
+    raise RuntimeError(f"Impossible de lire le fichier texte Statbel : {last_error}")
 
 def statbel_guess_columns(df):
     cols = {str(c).lower(): c for c in df.columns}
@@ -366,7 +432,7 @@ with tintegrations:
 
     st.divider()
     st.subheader("🇧🇪 Statbel — marché immobilier officiel")
-    st.caption("Source officielle : ventes immobilières, quartiles Q25/Q50/Q75, niveaux Belgique/régions/provinces/arrondissements/communes.")
+    st.caption("Source officielle Statbel : ventes immobilières et quartiles Q25/Q50/Q75. La V5.1.1 essaie le XLSX puis bascule automatiquement sur le ZIP/TXT officiel si nécessaire.")
     if st.button("Charger / actualiser Statbel"):
         try:
             sdf = load_statbel_real_estate()
