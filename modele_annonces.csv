@@ -1,0 +1,5 @@
+id,titre,ville,distance_km,prix,surface_m2,terrain_m2,travaux,valeur_apres_travaux,url
+DEMO-001,Maison à rénover,Houffalize,12,95000,145,900,60000,230000,https://example.com
+DEMO-002,Maison 4 façades,Bastogne,22,125000,180,1100,75000,265000,https://example.com
+DEMO-003,Maison à rénovation lourde,Vielsalm,35,85000,160,700,105000,225000,https://example.com
+DEMO-004,Maison sous-évaluée,La Roche-en-Ardenne,28,110000,170,1200,55000,255000,https://example.com
